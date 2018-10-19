@@ -1,7 +1,11 @@
-package client;
+package client.testudp;
 
+import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ConnectException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.Socket;
 import java.util.Random;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -11,11 +15,13 @@ import java.util.concurrent.TimeUnit;
 
 import com.alibaba.fastjson.JSONObject;
 
+import client.Int2ByteUtil;
+
 public class MyClientSocket {
     
-    private int port = 17921;
+    private int port = 20000;
 //    private String host = "192.168.0.110";
-    private String host = "localhost";
+    private InetAddress host;
     private LinkedBlockingQueue<byte[]> queue = new LinkedBlockingQueue<byte[]>();
     private LinkedBlockingQueue<JSONObject> sendQueue = new LinkedBlockingQueue<JSONObject>();
     //下发消息的线程池
@@ -32,7 +38,7 @@ public class MyClientSocket {
         }
     }
     
-    private Socket socket = null;
+    private DatagramSocket socket = null;
     private OutputStream writer;
 
     public LinkedBlockingQueue<byte[]> getQueue() {
@@ -83,14 +89,26 @@ public class MyClientSocket {
             while (true) {
                 try {
                     if (socket == null || socket.isClosed()) {
-                        socket = new Socket(host, port);//连接socket
-                        socket.setTcpNoDelay(true);
-                        writer=socket.getOutputStream();
-                        if(socket!=null) {
-                            new Thread(new ClientReadThread(socket,queue,sendQueue)).start();
-//                            new Thread(new ClientWriteThread(socket,writer,queue)).start();
-                            sendCommand();
-                        }
+                        System.out.println("开始连接udp");
+                        socket = new DatagramSocket(); 
+                        host = InetAddress.getByName("193.112.183.70");
+//                        host = InetAddress.getByName("localhost");
+                        DatagramPacket outputPacket=new DatagramPacket("CCCC0000".getBytes(),
+                                "CCCC0000".getBytes().length,host,port);
+                        socket.send(outputPacket);
+                        System.out.println("数据发送完毕");
+                        //先准备一个空数据报文
+                        String msg="";
+                        DatagramPacket inputPacket=new DatagramPacket(new byte[4],4);
+                          try {
+                              //阻塞语句，有数据就装包，以装完或装满为此.
+                              socket.receive(inputPacket);
+                              //从报文中取出字节数据并装饰成字符。
+                             System.out.println(Int2ByteUtil.byte2StringHex(inputPacket.getData()));
+                          } catch (IOException ex) {
+                              msg=null;
+                          }
+                        System.out.println("udp执行完一次循环");
                     }
                 } catch (Exception e) {
                     if(e instanceof ConnectException) {

@@ -1,5 +1,5 @@
 
-package client;
+package client.testudp;
 
 import java.io.IOException;
 import java.io.OutputStream;

@@ -1,5 +1,5 @@
 
-package client;
+package client.nb;
 
 import java.io.BufferedInputStream;
 import java.io.IOException;
@@ -8,8 +8,10 @@ import java.net.Socket;
 import java.util.Arrays;
 import java.util.concurrent.LinkedBlockingQueue;
 
-
 import com.alibaba.fastjson.JSONObject;
+
+import client.ClientSocketUtil;
+import client.Int2ByteUtil;
 
 /**
  * 客户端读取数据类 用来下发命令和调用北向api
@@ -29,6 +31,7 @@ public class ClientReadThread implements Runnable {
     
     //缓冲区1M
     private byte[] tempBytes = new byte[1024 * 1024];
+    private int tempBegin = 0;
     //每次读取数据长度1k
     private int readDataLen = 1024;
     private int siglePackageLen = 0;//提取出包的长度
@@ -38,9 +41,11 @@ public class ClientReadThread implements Runnable {
      * 粘包处理
      * @param RecvLen 读取了多少字节
      * @param ReceiveData 读取到的数据
+     * @throws InterruptedException 
+     * @throws UnsupportedEncodingException 
      * @throws Exception
      */
-    private void receivedPackage(int recvLen,byte[] receiveData) {
+    private void receivedPackage(int recvLen,byte[] receiveData) throws UnsupportedEncodingException, InterruptedException {
         long startTime = System.currentTimeMillis();
         //将收到的数据copy拼接至缓冲区
         System.arraycopy(receiveData, 0, tempBytes, sequenceLen, recvLen);
@@ -50,108 +55,72 @@ public class ClientReadThread implements Runnable {
         System.out.println("将收到的数据copy拼接至缓冲区耗时:"+(endTime-startTime));
         
         //是否能提取出下一包数据的长度，这一步保证后续操作能解析出这一包数据的长度，当前场景head+len=6
-        if (sequenceLen < 6) {
+        //解析头部
+        if(sequenceLen < 6) {
             return;
         }
-        
         while(siglePackageLen <= sequenceLen) {
-            long singleStartTime = System.currentTimeMillis();
             
-        	//提取包head
-            byte[] head = Arrays.copyOfRange(tempBytes, 0, 2);
-            sequenceLen = sequenceLen-2;
-            //提取包len
-            byte[] len = Arrays.copyOfRange(tempBytes, 2, 2+4);
-            sequenceLen = sequenceLen-4;
-            //从缓冲区中移除包len
-            siglePackageLen = Int2ByteUtil.byteArrayToInt(len);
-            System.out.println("当前包总长度："+siglePackageLen+",缓冲区总长度："+sequenceLen);
-            if(siglePackageLen <= 0) {
-                sequenceLen += 6;
-            	return;
-            }
-        	//根据长度读取body
-            int bodyLen = siglePackageLen-6;
-            byte[] bodyByte = new byte[bodyLen];
-            
-            if(sequenceLen > bodyByte.length) {
-            	System.out.println("数据过剩还有下一包，读取，移动至下一包");
-            	//数据过剩还有下一包，读取，移动至下一包
-            	//从缓冲区中读取body
-            	bodyByte = Arrays.copyOfRange(tempBytes, 2+4, 2+4+bodyLen);
-            	sequenceLen = sequenceLen - bodyLen;
-                //处理逻辑，放到队列
-            	try {
-                    dataMessageQue.put(new DataMessage(siglePackageLen, bodyByte));
-                } catch (InterruptedException e1) {
-                    System.out.println(e1.getMessage());
-                }
-            	
-            	new Thread(new Runnable() {
-                    
-                    @Override
-                    public void run() {
-                        try {
-                            ;
-                            bodyHandler(dataMessageQue.take().getSequenceLen(), dataMessageQue.take().getB());
-                        } catch (UnsupportedEncodingException | InterruptedException e) {
-                            System.out.println(e.getMessage());
-                        }
-                    }
-                }).start();
-            	
-                //移动至下一包
-                byte[] temp = new byte[tempBytes.length - (2+4+bodyLen)];
-                System.arraycopy(tempBytes, 2+4+bodyLen, temp, 0, temp.length);
+            int tempEnd = tempBegin+6;
+            if(tempEnd>sequenceLen) {
+                //头部不足
+                System.out.println("头部不足");
+                byte[] b = Arrays.copyOfRange(tempBytes, tempBegin, sequenceLen);
                 tempBytes = new byte[256 * 1024];
-                System.arraycopy(temp, 0, tempBytes, 0, temp.length);
-                siglePackageLen = 0;
-            }else if(sequenceLen == bodyByte.length) {
-            	System.out.println("数据刚好足够最后一包，读取，并清空缓存");
-            	//数据刚好足够最后一包，读取，并清空缓存
-            	//从缓冲区中读取body
-            	bodyByte = Arrays.copyOfRange(tempBytes, 2+4, 2+4+bodyLen);
-                //处理逻辑，放到队列
-            	try {
-                    dataMessageQue.put(new DataMessage(siglePackageLen, bodyByte));
-                } catch (InterruptedException e1) {
-                    System.out.println(e1.getMessage());
-                }
-                
-                new Thread(new Runnable() {
-                    
-                    @Override
-                    public void run() {
-                        try {
-                            ;
-                            bodyHandler(dataMessageQue.take().getSequenceLen(), dataMessageQue.take().getB());
-                        } catch (UnsupportedEncodingException | InterruptedException e) {
-                            System.out.println(e.getMessage());
-                        }
-                    }
-                }).start();
+                System.arraycopy(b, 0, tempBytes, 0, b.length);
+                siglePackageLen=0;
+                sequenceLen = b.length;//新的缓存区数据长度
+                tempBegin = 0;
+                return;
+            }
+            byte[] head = Arrays.copyOfRange(tempBytes, tempBegin, tempEnd);
+            
+            // 读取完头部 [下一次起始位置] 从 [上一次的结束位置] 开始
+            tempBegin = tempEnd;
+            byte[] len = new byte[4];
+            len[0] = head[2];
+            len[1] = head[3];
+            len[3] = head[4];
+            len[4] = head[5];
+            //计算单包长度
+            siglePackageLen = Int2ByteUtil.byteArrayToInt(len);
+            //读取完单包长度，结束位置为包尾
+            tempEnd = tempBegin + siglePackageLen - 6;
+            
+            if( tempEnd > sequenceLen ) {
+                //结束位置>缓冲区内数据长度
+                System.out.println("结束位置>缓冲区内数据长度");
+                byte[] bodyByte = Arrays.copyOfRange(tempBytes, tempBegin, sequenceLen);
+                tempBytes = new byte[256 * 1024];
+                System.arraycopy(head, 0, tempBytes, 0, head.length);
+                System.arraycopy(bodyByte, 0, tempBytes, head.length, bodyByte.length);
+                siglePackageLen=0;
+                sequenceLen = head.length + bodyByte.length;//新的缓存区数据长度
+                tempBegin = 0;
+                return;
+            } else if(tempEnd == sequenceLen) {
+                //结束位置=缓冲区内数据长度
+                System.out.println("结束位置=缓冲区内数据长度");
+                byte[] bodyByte = Arrays.copyOfRange(tempBytes, tempBegin, tempEnd);
+                bodyHandler(siglePackageLen, bodyByte);
                 tempBytes = new byte[256 * 1024];
                 sequenceLen = 0;
                 siglePackageLen = 0;
-                System.out.println("解析内存耗时:"+(endTime-startTime)+"\n");
+                tempBegin = 0;
                 return;
-            }else {
-            	System.out.println("数据不全，继续读取。");
-            	//数据不全，继续读取。
-            	bodyByte = Arrays.copyOfRange(tempBytes, 2+4, sequenceLen);
-            	tempBytes = new byte[256 * 1024];
-            	System.arraycopy(head, 0, tempBytes, 0, head.length);
-            	System.arraycopy(len, 0, tempBytes, head.length, len.length);
-            	System.arraycopy(bodyByte, 0, tempBytes, head.length + len.length, bodyByte.length);
-            	siglePackageLen=0;
-            	sequenceLen += 6;
-            	System.out.println("解析内存耗时:"+(endTime-startTime)+"\n");
-            	return;
+            } else {
+                //结束位置<缓冲区内数据长度
+                byte[] bodyByte = Arrays.copyOfRange(tempBytes, tempBegin, tempEnd);
+                //处理逻辑，放到队列
+                bodyHandler(siglePackageLen, bodyByte);
+                //读取完body,移动至下一包，记录tempBegin = tempEnd;
+                tempBegin = tempEnd;
+                siglePackageLen = 0;
             }
-            
-            long singleEndTime = System.currentTimeMillis();
-            System.out.println("解析一个包耗时:"+(singleEndTime-singleStartTime));
         }
+        
+        endTime = System.currentTimeMillis();
+        System.out.println("解析一个包耗时:"+(endTime-startTime));
     }
     
     /**
@@ -273,7 +242,7 @@ public class ClientReadThread implements Runnable {
 		
 		if (command == 0x66) {
 			//数据回复
-//		    queue.put(ClientSocketUtil.sendDataReply(cmd, tag, ut, new byte[]{0x01}));
+		    queue.put(ClientSocketUtil.sendDataReply(cmd, tag, ut, new byte[]{0x01}));
 		    int datalen = length - 0x10;
 		    byte[] data = null;
 		    if (datalen > 0) {
